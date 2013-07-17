@@ -1,0 +1,6 @@
+config FILEMASH_FS
+	tristate "FileMash file system (EXPERIMENTAL)"
+	help
+	  Add support for FileMash filesystem.
+
+	  If unsure, say N.

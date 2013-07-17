@@ -1,0 +1,422 @@
+File Mash Filesystem
+---------------
+Contents:
+	1) Overview
+ 	2) How to use it?
+	3) Features
+	4) Format of mount option
+	5) Practical examples
+	6) Nice to have capabilities
+	7) FAQ
+
+
+1) Overview
+-----------
+
+Consider the following situation:
+
+a) You have a large file that needs to be expanded but you are running out of
+space on that filesystem. For muliple reasons you do not have the capability
+to expand the filesystem. You either have to move the file to a bigger
+filesystem or cleanup space on the current filesystem. What if you had the
+capability to expand the file to another filesystem?
+
+b) You have a large file whose contents change every day by a few bytes. An
+incremental backup of the filesystem; everyday using rsync, will end up making
+copies of the large file everytime. Instead; if your large file was mashedup
+using multiple smaller files, an incremental backup of the filesystem will
+just backup the smaller files that have changed; thus saving lots of backup
+space.
+
+c) Large files; imagine virtual disk images, that have some sections that
+hardly change, some sections that have significant i/o activity, and some
+sections that need redundancy. This need can be met if there is a way
+to mashup the file using smaller files residing on filesystem appropriate
+to the need.
+
+d) Imagine multiple files containing data which is mostly common. In such case
+storage space is unnecessary wasted.  What if there was a way to separate out
+the common data into a file and use that file to mashup each of the files?
+Data can be deduplicated saving lots of storage space.
+
+e) Imagine a script file which for whatever reason cannot be modified, but
+needs to be fixed to make it usable. What if there was way to temporarily
+patch that script without actually modifying the script?
+
+f) <fill in more applications>
+
+FileMash filesystem is an attempt to provide the ability to mash-up a new
+file using multiple existing files in creative ways.
+
+It is currently implemented as a filesystem driver that stacks on top of other
+filesystem drivers. It provides the capability to create the illusion of a new
+file by using the space provided by the sub-ordinate files residing on other
+filesystems.
+
+In other words, it provides unioning capability -- the capability to union
+files, not filesystems.
+
+
+2) How to use it?
+------------------
+
+Apply the patch.  This patch has been prototyped/tested on 3.0.9-rc1.
+
+$ make fs/filemashfs/filemashfs.ko
+$ modprobe  filemashfs.ko
+
+$ cat > file_even <<-!
+0000
+2222
+4444
+6666
+8888
+!
+
+$ cat > file_odd <<-!
+1111
+3333
+5555
+7777
+9999
+!
+
+# Example 1
+# create a new file named file_evenodd using contents of file 'file_even' followed by
+# contents of file 'file_odd'. Use the content in a striped fashion.
+$ touch file_evenodd
+$ mount -t filemashfs -ofile=file_even,file=file_odd,layout=stripe:5 s file_evenodd
+
+$ cat file_evenodd
+0000
+1111
+2222
+3333
+4444
+5555
+6666
+7777
+8888
+9999
+
+# Example 2
+# create a new file named file_evenodd using contents of file 'file_odd' followed by
+# contents of  file 'file_even'. Use the content in a striped fashion.
+$ touch file_oddeven
+$ mount -t filemashfs -ofile=file_odd,file=file_even,layout=stripe:5 s file_oddeven
+
+$ cat file_oddeven
+1111
+0000
+3333
+2222
+5555
+4444
+7777
+6666
+9999
+8888
+
+# Example 3:
+# create a new file named file_concat using entire contents of file 'file_odd' followed by
+# entire contents of  file 'file_even'.
+$ touch file_concat
+$ mount -t filemashfs -ofile=file_odd,file=file_even,layout=concat s file_concat
+$ cat file_concat
+1111
+3333
+5555
+7777
+9999
+0000
+2222
+4444
+6666
+8888
+
+# Example 4:
+# Here is a example demonstating how contents get fanned out to sub-ordinate files when data is
+# written to the mashed file.
+
+$ touch firstfile
+$ touch secondfile
+$ touch mashfile
+
+$ mount -t filemashfs -ofile=firstfile,file=secondfile,layout=stripe:10 s mashfile
+$ cat > mashfile <<!
+> 000000000
+> 111111111
+> 222222222
+> 333333333
+> 444444444
+> 555555555
+> 666666666
+> 777777777
+> 888888888
+> 999999999
+> !
+
+$ cat firstfile
+000000000
+222222222
+444444444
+666666666
+888888888
+
+$ cat secondfile 
+111111111
+333333333
+555555555
+777777777
+999999999
+
+
+
+2) Features
+-----------
+
+FileMash filesystem provides two features currently.
+
+a) Striping
+b) Concatenation
+
+If the data needs to striped evenly across all the subordinate files, striping
+option helps do that.  In the above example layout=stripe:5 is used. It tells
+the filesystem to use first 5 bytes from the first file, the second 5 bytes
+from the second file, the third 5 bytes from the first file, and so on an so
+forth till the first and the second file have no more data to offer.
+
+If the data needs to concatenated using all the subordinate files, concat
+option is your choice. In the above example layout=concat is used. It tells
+the filesystem to use all the available bytes in the first file and then
+proceed to use all the available bytes in the second file.
+
+The area of the subordinate file to be used can be specified on the command
+line. This will ensure that only the specified area is used by the mashed file
+and thus cannot cross the boundaries of that sub-ordinate file.
+
+$ mount -t filemashfs -ofile=file_odd:10:20,file=file_even,layout=concat s file_concat
+
+This command specifies that file_odd from byte 10 to the next 20bytes must
+be used. The sub-ordinate file cannot not be expanded by writing additional
+data to the mashedup file.
+
+
+3) Format of the mount option
+--------------------------
+
+ The format of the mount option is as follows
+
+ -o (file=filename:[offset]:[length],)*,layout=<stripe:size|concat>,.....
+ 
+  The file keyword specifies the name of the sub-ordinate file to be used
+  for mashup. The 'offset' specifies the location from which the file can
+  be used for read/write. The 'length' specifies the size of the file, starting
+  from the 'offset' location, to be used for read/write. If 'offset' is not
+  specified the file is used from its zeroth byte. if 'length' is not
+  specified the file is assumed to have infinite size, limited only by 
+  the size of the filesystem on which it resides.
+
+  Multile files can be specified. The order in which files are specified is
+  significant, since it dictates the order in which the mashed-up file will
+  map its contents to the underlying sub-ordinate files.
+
+  The layout keyword specifies the file mashup policy. Currently it supports
+  stripe or concat policy. The layout defaults to concat policy. The 'stripe'
+  keyword takes an addition option which specifies the length of the stripe.
+
+
+$ mount -t filemashfs -ofile=file_even,file=file_odd,layout=stripe:5  \
+                 s file_evenodd
+
+          file_even                           file_evenodd
+          ,----,                                ,----,
+          |0000| <----------------------------- |0000|
+          |2222| <--,                ,--------  |1111|
+          |4444| <-, `--------------/---------  |2222|
+          |6666|<-, \              / ,--------  |3333|
+          |8888|<~ \ '---------- -/-/---------  |4444|
+          '----'  \ \            / / ,--------  |5555|
+                   \ '-------- -/-/-/---------  |6666|
+                    \          / / /  ,------   |7777|
+          file_odd   '--------/-/-/--/ ------   |8888|
+          ,----,             / / /  /  /-----   |9999|
+          |1111|  <---------' / /  /  /         '----'
+          |3333|  <----------' /  /  /
+          |5555|  <-----------'  /  /
+          |7777|  <-------------'  /
+          |9999|  <---------------'
+          '----' 
+        
+$ mount -t filemashfs -ofile=file_even:5,file=file_odd,layout=stripe:5  \
+               s file_evenodd
+
+          file_even                           file_evenodd
+          ,----,                                ,----,
+          |0000|    ,-------------------------- |2222|
+          |2222| <-'                 ,--------  |1111|
+          |4444| <------------------/---------  |4444|
+          |6666| <--,              / ,--------  |3333|
+          |8888| <-, '---------- -/-/---------  |6666|
+          '----'    \            / / ,--------  |5555|
+                     '-------- -/-/-/---------  |8888|
+                               / / /  ,------   |7777|
+          file_odd            / / /  /  ,-----  |9999|
+          ,----,             / / /  /  /        '----'
+          |1111|  <---------' / /  /  /         
+          |3333|  <----------' /  /  /
+          |5555|  <-----------'  /  /
+          |7777|  <-------------'  /
+          |9999|  <---------------'
+          '----' 
+
+$ mount -t filemashfs -ofile=file_even:5:10,file=file_odd,layout=stripe:5  \
+                s file_evenodd
+
+          file_even                           file_evenodd
+          ,----,                                ,----,
+          |0000|    ,-------------------------- |2222|
+          |2222| <-'                 ,--------  |1111|
+          |4444| <------------------/---------  |4444|
+          |6666|                   / ,--------  |3333|
+          |8888|                  / / ,-------  |5555|
+          '----'                 / / /  ,-----  |7777|
+                                / / /  /  ,---  |9999|
+                               / / /  /  /      '----' 
+          file_odd            / / /  /  /
+          ,----,             / / /  /  /
+          |1111|  <---------' / /  /  /         
+          |3333|  <----------' /  /  /
+          |5555|  <-----------'  /  /
+          |7777|  <-------------'  /
+          |9999|  <---------------'
+          '----' 
+
+
+$ mount -t filemashfs -ofile=file_even:10:20,file=file_odd:5:,layout=concat \
+                s file_concat
+
+          file_even                           file_concat
+          ,----,                                ,----,
+          |0000|     ,------------------------- |4444|
+          |2222|    /                ,--------  |6666|
+          |4444| <-`                / ,-------  |3333|
+          |6666| <---------------- / / ,------  |5555|
+          |8888|                    / /  ,----  |7777|
+          '----'                   / /  /  ,--  |9999|
+                                  / /  /  /     '----'
+                                 / /  /  /
+          file_odd              / /  /  /
+          ,----,               / /  /  /
+          |1111|              / /  /  /         
+          |3333|  <----------' /  /  /
+          |5555|  <-----------'  /  /
+          |7777|  <-------------'  /
+          |9999|  <---------------'
+          '----' 
+        
+
+4) Practical examples
+----------------------
+
+a) how to create a large file spanning multiple filesystems?
+
+assuming that we have 5 differen filesystems mounted at /F1, /F2, /F3, /F4, /F5
+
+$ touch /F1/f1
+$ touch /F2/f2
+$ touch /F3/f3
+$ touch /F4/f4
+$ touch /F5/f5
+
+$ touch /mybigfile
+$ mount -t filemashfs -ofile=/F1/f1,file=/F2/f2,file=/F3/f3,file=/F4/f4,file=F5/f5,layout=stripe:10000 s /mybigfile
+
+start writing data to /mybigfile and it will continue to grow that file till
+all the space on all the filesystem is exhausted! I have not tested it yet.
+But that should work by design. Implementation; I promise, is currently buggy :).
+
+
+
+b) how do I patch a file?
+
+Assume you have a script named hello.sh
+
+$ cat hello.sh
+#/bin/bash
+echo Spanish:  hola?
+echo Mandarin: ni hao ma?
+echo English:  I don't know :(
+echo Hindi:    aap kaise hai?
+echo Kannada:  Nee Hege Iddiya?
+
+	we know that "I don't know :(" has to be "How are you?".
+	So create a file named "fix" with the correct string in it.
+
+#echo 'How are you?' > fix
+
+	And mashup a new "hello.sh" file using parts of "hello.sh" and parts of
+	"fix".
+
+#mount -t filemashfs -ofile=hello.sh:0:73,file=fix,file=hello.sh:89,layout=concat s hello.sh
+
+# cat hello.sh
+#/bin/bash
+echo Spanish:  hola?
+echo Mandarin: ni hao ma?
+echo English:  How are you?
+echo Hindi:    aap kaise hai?
+echo Kannada:  Nee Hege Iddiya?
+
+<hello.sh is now fixed!>
+
+
+c) How do I deduplicate files?
+
+	I leave this as an exercise to you :)
+
+
+6. Nice to have capabilities
+-------------------------
+
+a) Ability to add or remove a file dynamically from a mashed up file.
+
+b) ??
+
+
+7. FAQ
+-------
+
+a) Why is this not implemented using FUSE?
+
+	I do not have numbers to prove this. But I think it might be less
+	performant, given that reads/writes have to make a few trips
+	between userspace and kernel.
+
+
+b) btrfs has a feature which allows a filesystem to extended using files from
+	other filesystem using loop device. Why is this different?
+
+	That feature lets you extend filesystem using files. The proposed
+	feature lets us extend files using filesystems. The features are
+	complementary in nature.
+
+
+c) One of the application; you mentioned above, mentions deduplication. Does it
+	deduplicate automatically?
+
+	No. The current prototype code does support any
+	deduplication. It just provides the mechanism to deduplicate
+	data and consolidate filesystem space. The user has to
+	identify the files that have
+	common data, move that data into a single file and mashup
+	all the other files using this new file.
+	A userspace tool can be written to do so.
+
+
+
+Thanks for your interest till now!
+------------------------------------------------------------------------
+version 0.1  (created the initial document, Ram Pai linuxram@us.ibm.com)
+version 0.2  (added nice to have capabilities and FAQ, based on inputs from
+			Chandra and Malahal)
