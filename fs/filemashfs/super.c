@@ -32,10 +32,13 @@ MODULE_LICENSE("GPL");
 #define my_div(numerator, denominator)   ((numerator)/(denominator))
 #define my_mod(numerator, denominator)   ((numerator)%(denominator))
 
+const char *fm_fs_mount_xattr = "user.filemash.options";
+
 #define FM_READ  1
 #define FM_WRITE 2
 
 #define MAX_FILE 16
+#define OPTION_STRING_LEN 100
 
 struct fm_info  {
 	char	*f_file;
@@ -481,9 +484,13 @@ static struct fm_info *filemash_parse_opt(char *opt, int *total_files)
 {
 	char *p, *q, *r;
 	int i, total = 0;
-	struct fm_info *fm_info = (struct fm_info *)
-		kzalloc((MAX_FILE+1)*sizeof(struct fm_info), GFP_KERNEL);
+	struct fm_info *fm_info = NULL;
 
+	if (!opt)
+		goto fail;
+
+	fm_info = (struct fm_info *)
+		kzalloc((MAX_FILE+1)*sizeof(struct fm_info), GFP_KERNEL);
 	if (!fm_info)
 		goto fail;
 
@@ -624,16 +631,57 @@ static int *sort_info(struct fm_info *array, int total, int stripe_len)
 	return sort;
 }
 
-static int filemash_fill_super(struct super_block *sb, void *data, int silent)
+ssize_t
+filemash_getxattr(const char *name, const char *attr_name, void *value, size_t size)
+{
+	struct path path;
+	size_t r_size;
+	int err = kern_path(name, LOOKUP_FOLLOW, &path);
+
+	if (err) return err;
+	
+	r_size = vfs_getxattr(path.dentry, attr_name, value, size);
+	path_put(&path);
+
+	return r_size;
+}
+
+int
+filemash_setxattr(const char *name, const char *attr_name, void *value, size_t size, int flags)
+{
+	struct path path;
+	int err = kern_path(name, LOOKUP_FOLLOW, &path);
+
+	if (err) return err;
+	
+	err = vfs_setxattr(path.dentry, attr_name, value, size, flags);
+	path_put(&path);
+
+	return err;
+}
+
+static int filemash_fill_super(struct super_block *sb, const char *dev_name, void *data, int silent)
 {
 	struct inode *root_inode;
 	struct dentry *root_dentry;
 	struct fm_fs *fm_fs;
 	int i, j, total_files = 0;
 	int err = -ENOMEM;
-	struct fm_info *fm_info = (struct fm_info *)
-			filemash_parse_opt((char *) data, &total_files);
+	struct fm_info *fm_info = NULL;
+	char r_data[OPTION_STRING_LEN];
 
+	if (!data) {
+	        if (filemash_getxattr(dev_name, fm_fs_mount_xattr, (void *)r_data, OPTION_STRING_LEN) < 0) {
+			printk("cannot extract extended attributes\n");
+			goto out;
+		}
+		data = r_data;
+		printk("using extended attributes data=%s\n", (char *)data);
+	} else
+		strncpy(r_data, (char *)data, OPTION_STRING_LEN);
+	
+	fm_info = (struct fm_info *)
+			filemash_parse_opt((char *) data, &total_files);
 	if (!fm_info)
 		goto out;
 
@@ -682,6 +730,11 @@ static int filemash_fill_super(struct super_block *sb, void *data, int silent)
 	sb->s_root = root_dentry;
 	sb->s_fs_info = (void *)fm_fs;
 
+	/* save the paths in extended attributes */
+	if (r_data != data  && filemash_setxattr(dev_name, fm_fs_mount_xattr, 
+			(char *)r_data, OPTION_STRING_LEN, 0))
+		printk("cannot save extended attributes\n");
+
 	return 0;
 
 out_release_root:
@@ -704,10 +757,23 @@ out:
 static struct dentry *filemash_mount(struct file_system_type *fs_type,
 					int flags,
 					const char *dev_name,
-					void *raw_data)
+					void *data)
 {
-	return mount_nodev(fs_type, flags, raw_data, filemash_fill_super);
+        int error;
+        struct super_block *s = sget(fs_type, NULL, set_anon_super, flags, NULL);
+
+        if (IS_ERR(s))
+                return ERR_CAST(s);
+
+        error = filemash_fill_super(s, dev_name, data, flags & MS_SILENT ? 1 : 0);
+        if (error) {
+                deactivate_locked_super(s);
+                return ERR_PTR(error);
+        }
+        s->s_flags |= MS_ACTIVE;
+        return dget(s->s_root);
 }
+
 
 static struct file_system_type filemash_fs_type = {
 	.owner		= THIS_MODULE,
