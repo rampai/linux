@@ -32,7 +32,7 @@ MODULE_LICENSE("GPL");
 #define my_div(numerator, denominator)   ((numerator)/(denominator))
 #define my_mod(numerator, denominator)   ((numerator)%(denominator))
 
-const char *fm_fs_mount_xattr = "user.filemash.options";
+static const char *fm_fs_mount_xattr = "user.filemash.";
 
 #define FM_READ  1
 #define FM_WRITE 2
@@ -633,18 +633,42 @@ static int *sort_info(struct fm_info *array, int total, int stripe_len)
 	return sort;
 }
 
+static char *strcat_repl(const char *str1, const char *str2, char c1, char c2)
+{
+	char *attr = (char *)kmalloc(strlen(str1)+strlen(str2), GFP_KERNEL);
+	char *tmp = attr;
+	if (!attr) return NULL;
+
+	while ((*attr++ = *str1++) != '\0');
+	attr--;
+	while (*str2 != '\0') {
+		if (*str2 == c1)
+			*attr++ = c2;
+		else
+			*attr++ = *str2;
+		str2++;
+	}
+	*attr = '\0';
+	return tmp;
+}
+
 ssize_t
 filemash_getxattr(const char *name, const char *attr_name, void *value, size_t size)
 {
 	struct path path;
 	size_t r_size;
+	char *attr;
 	int err = kern_path(name, LOOKUP_FOLLOW, &path);
 
 	if (err) return err;
-	
-	r_size = vfs_getxattr(path.dentry, attr_name, value, size);
+
+	if (!(attr = strcat_repl(attr_name, name, '/', '_')))
+		return -ENOMEM;
+
+	r_size = vfs_getxattr(path.dentry, attr, value, size);
 	path_put(&path);
 
+	kfree(attr);
 	return r_size;
 }
 
@@ -652,13 +676,18 @@ int
 filemash_setxattr(const char *name, const char *attr_name, void *value, size_t size, int flags)
 {
 	struct path path;
+	char *attr;
 	int err = kern_path(name, LOOKUP_FOLLOW, &path);
 
 	if (err) return err;
-	
-	err = vfs_setxattr(path.dentry, attr_name, value, size, flags);
+
+	if (!(attr = strcat_repl(attr_name, name, '/', '_')))
+		return -ENOMEM;
+
+	err = vfs_setxattr(path.dentry, attr, value, size, flags);
 	path_put(&path);
 
+	kfree(attr);
 	return err;
 }
 
