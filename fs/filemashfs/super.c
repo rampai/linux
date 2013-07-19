@@ -505,6 +505,10 @@ static struct fm_info *filemash_parse_opt(char *opt, int *total_files)
 			continue;
 
 		token = match_token(p, filemash_tokens, args);
+
+		// restore the ',' overwritten by strsep()
+		if (opt) *(opt-1) = ',';
+
 		switch (token) {
 		case opt_file:
 			total++;
@@ -699,17 +703,15 @@ static int filemash_fill_super(struct super_block *sb, const char *dev_name, voi
 	int i, j, total_files = 0;
 	int err = -EINVAL;
 	struct fm_info *fm_info = NULL;
-	char r_data[OPTION_STRING_LEN];
+	char x_data[OPTION_STRING_LEN];
 
 	if (!data) {
-	        if (filemash_getxattr(dev_name, fm_fs_mount_xattr, (void *)r_data, OPTION_STRING_LEN) < 0) {
+		data = x_data;
+	        if (filemash_getxattr(dev_name, fm_fs_mount_xattr, data, OPTION_STRING_LEN) < 0) {
 			printk("cannot extract extended attributes\n");
 			goto out;
 		}
-		data = r_data;
-		printk("using extended attributes data=%s\n", (char *)data);
-	} else
-		strncpy(r_data, (char *)data, OPTION_STRING_LEN);
+	}
 	
 	fm_info = (struct fm_info *)
 			filemash_parse_opt((char *) data, &total_files);
@@ -763,8 +765,8 @@ static int filemash_fill_super(struct super_block *sb, const char *dev_name, voi
 	sb->s_fs_info = (void *)fm_fs;
 
 	/* save the paths in extended attributes */
-	if (r_data != data  && filemash_setxattr(dev_name, fm_fs_mount_xattr, 
-			(char *)r_data, OPTION_STRING_LEN, 0))
+	if (x_data != data  && filemash_setxattr(dev_name, fm_fs_mount_xattr, 
+			(char *)data, OPTION_STRING_LEN, 0))
 		printk("cannot save extended attributes\n");
 
 	return 0;
