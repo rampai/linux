@@ -538,6 +538,8 @@ static struct fm_info *filemash_parse_opt(char *opt, int *total_files)
 			fm_info[0].f_file = r;
 
 			if (strncmp(r, "stripe", 6)) {
+				if (strncmp(r, "concat", 6))
+					goto fail;
 				fm_info[0].f_len = 0;
 				break;
 			}
@@ -630,13 +632,13 @@ static int filemash_fill_super(struct super_block *sb, void *data, int silent)
 	struct dentry *root_dentry;
 	struct fm_fs *fm_fs;
 	int i, j, total_files = 0;
-	int err = -ENOMEM;
+	int err = -EINVAL;
 	struct fm_info *fm_info = (struct fm_info *)
-			filemash_parse_opt((char *) data, &total_files);
-
+				filemash_parse_opt((char *) data, &total_files);
 	if (!fm_info)
 		goto out;
 
+	err = -ENOMEM;
 	fm_fs = kmalloc(sizeof(struct fm_fs), GFP_KERNEL);
 	if (!fm_fs)
 		goto out;
